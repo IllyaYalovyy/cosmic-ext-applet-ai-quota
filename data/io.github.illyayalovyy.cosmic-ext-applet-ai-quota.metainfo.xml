@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="addon">
+  <id>io.github.illyayalovyy.cosmic-ext-applet-ai-quota</id>
+  <extends>com.system76.CosmicPanel</extends>
+  <name>AI Quota</name>
+  <developer id="io.github.illyayalovyy"><name>Illya Yalovyy</name></developer>
+  <summary>Claude Code and Codex usage limits in the panel, without starting model turns to check</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <description>
+    <p>
+      Shows one compact symbol-and-meter pair per provider in the COSMIC panel
+      and a popup with every Claude Code and Codex rate-limit window, reset
+      time, and freshness. Usage is read from Claude Code's local cache and the
+      documented Codex App Server account endpoint; checking never starts a
+      model turn.
+    </p>
+  </description>
+  <url type="homepage">https://github.com/IllyaYalovyy/cosmic-ext-applet-ai-quota</url>
+  <url type="bugtracker">https://github.com/IllyaYalovyy/cosmic-ext-applet-ai-quota/issues</url>
+  <launchable type="desktop-id">io.github.illyayalovyy.cosmic-ext-applet-ai-quota.desktop</launchable>
+  <provides>
+    <binary>cosmic-ext-applet-ai-quota</binary>
+  </provides>
+  <releases>
+    <release version="0.1.0" date="2026-11-08">
+      <description><p>First independent AI Quota release with Fedora 45 packaging.</p></description>
+    </release>
+  </releases>
+</component>

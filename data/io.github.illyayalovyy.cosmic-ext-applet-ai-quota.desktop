@@ -1,0 +1,13 @@
+[Desktop Entry]
+Name=AI Quota
+Comment=Claude Code and Codex usage limits for the COSMIC™ desktop
+Type=Application
+Exec=cosmic-ext-applet-ai-quota
+Terminal=false
+Categories=System;Monitor;
+Keywords=COSMIC;AI;Quota;Claude;Codex;Usage;Limits;
+Icon=io.github.illyayalovyy.cosmic-ext-applet-ai-quota-symbolic
+StartupNotify=true
+NoDisplay=true
+X-CosmicApplet=true
+X-CosmicHoverPopup=Auto
