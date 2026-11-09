@@ -55,6 +55,8 @@ jobs:
           ref: ${{ matrix.sha }}
           fetch-depth: 0
           persist-credentials: false
+      - name: Trust the mounted checkout inside this container
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - id: toolchain
         name: Identify Rust toolchain
         run: |

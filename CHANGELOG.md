@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.1 — 2026-11-09
+
+- Trust the mounted CI checkout explicitly so Git validation works inside the Fedora container.
+
 ## 0.2.0 — 2026-11-09
 
 - Add GitHub Actions tests and Fedora 45 RPM builds for each pushed commit.
