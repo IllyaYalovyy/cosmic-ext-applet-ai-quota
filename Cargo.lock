@@ -967,7 +967,7 @@ dependencies = [
 
 [[package]]
 name = "cosmic-ext-applet-ai-quota"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "chrono",
  "dirs",

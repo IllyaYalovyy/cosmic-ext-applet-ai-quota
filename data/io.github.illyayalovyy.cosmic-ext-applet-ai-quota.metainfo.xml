@@ -23,6 +23,9 @@
     <binary>cosmic-ext-applet-ai-quota</binary>
   </provides>
   <releases>
+    <release version="0.2.3" date="2026-11-09">
+      <description><p>Avoid delayed draft listing during automated publication.</p></description>
+    </release>
     <release version="0.2.2" date="2026-11-09">
       <description><p>Verify the full RPM payload in minimal CI containers.</p></description>
     </release>

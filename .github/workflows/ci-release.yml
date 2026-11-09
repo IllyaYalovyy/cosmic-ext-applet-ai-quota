@@ -69,6 +69,8 @@ jobs:
             ~/.cargo/git
             target
           key: fedora45-v1-${{ steps.toolchain.outputs.key }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            fedora45-v1-${{ steps.toolchain.outputs.key }}-
       - name: Run every offline test and render configuration
         run: ./scripts/ci-test.sh
       - name: Build Fedora 45 RPM

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.3 — 2026-11-09
+
+- Publish using the GitHub draft release ID directly, avoiding delayed release-list visibility.
+- Add regression coverage for draft creation before it appears in listings.
+- Reuse compatible build caches across version bumps while Cargo checks dependency fingerprints.
+
 ## 0.2.2 — 2026-11-09
 
 - Install documentation payloads in the minimal Fedora CI image so the RPM smoke test verifies bundled source archives.

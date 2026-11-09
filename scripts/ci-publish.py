@@ -7,7 +7,6 @@ from pathlib import Path
 import re
 import subprocess
 import sys
-import tempfile
 import tomllib
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -23,10 +22,10 @@ def gh(*args, input_text=None, missing=False):
     return result.stdout
 
 
-def api(path, payload=None, missing=False):
+def api(path, payload=None, missing=False, method="POST"):
     args = ['api', path]
     if payload is not None:
-        args += ['--method', 'POST', '--input', '-']
+        args += ['--method', method, '--input', '-']
     output = gh(*args, input_text=json.dumps(payload) if payload is not None else None,
                 missing=missing)
     return json.loads(output) if output is not None else None
@@ -97,21 +96,22 @@ def publish(repo, sha, directory):
                  'and RPM install/remove checks passed. Live COSMIC/provider-account checks remain manual.\n'
                  '\nThe unsigned RPM includes corresponding source and license notices.\n'
                  f'\nSHA-256: `{digest}`\n')
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.txt') as file:
-            file.write(notes)
-            file.flush()
-            gh('release', 'create', tag, '--repo', repo, '--verify-tag', '--draft',
-               '--title', f'AI Quota {version}', '--notes-file', file.name)
-        release = find_release(repo, tag)
-    # A retry may finish an incomplete draft, but cannot overwrite a public release.
+        release = api(f'repos/{repo}/releases', {
+            'tag_name': tag, 'name': f'AI Quota {version}', 'body': notes,
+            'draft': True, 'target_commitish': sha,
+        })
+    # Use the returned ID: GitHub release listings can lag behind creation.
+    release_id = release['id']
     if not release['assets']:
-        gh('release', 'upload', tag, str(path), '--repo', repo)
-    release = find_release(repo, tag)
+        gh('api', f'https://uploads.github.com/repos/{repo}/releases/{release_id}/assets?name={path.name}',
+           '--method', 'POST', '--header', 'Content-Type: application/x-rpm',
+           '--input', str(path))
+    release = api(f'repos/{repo}/releases/{release_id}')
     verify_asset(release, path, digest)
     current_main = api(f'repos/{repo}/commits/main')['sha']
-    gh('release', 'edit', tag, '--repo', repo, '--draft=false',
-       '--latest=' + ('true' if current_main == sha else 'false'))
-    published = api(f'repos/{repo}/releases/{release["id"]}')
+    published = api(f'repos/{repo}/releases/{release_id}', {
+        'draft': False, 'make_latest': 'true' if current_main == sha else 'false',
+    }, method='PATCH')
     if published['draft']:
         raise ValueError('Release remained a draft')
     verify_asset(published, path, digest)

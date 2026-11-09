@@ -77,7 +77,7 @@ class PublishTests(unittest.TestCase):
         return {'name': self.rpm.name, 'size': self.rpm.stat().st_size,
                 'digest': 'sha256:' + self.digest, 'state': 'uploaded'}
 
-    def api(self, path, payload=None, missing=False):
+    def api(self, path, payload=None, missing=False, method='POST'):
         if '/git/ref/tags/' in path:
             return {'object': {'sha': self.tag_sha}} if self.tag_sha else None
         if path.endswith('/git/refs'):
@@ -87,28 +87,30 @@ class PublishTests(unittest.TestCase):
             return {'sha': self.tag_sha}
         if path.endswith('/commits/main'):
             return {'sha': self.main_sha}
+        if path.endswith('/releases') and payload is not None:
+            self.release = {'id': 1, 'tag_name': 'v0.2.0', 'draft': True,
+                            'assets': [], 'html_url': 'https://example.invalid/release'}
+            return copy.deepcopy(self.release)
         if '/releases/' in path:
+            if payload is not None:
+                self.assertEqual(method, 'PATCH')
+                self.latest = '--latest=' + payload['make_latest']
+                self.release['draft'] = payload['draft']
             return copy.deepcopy(self.release)
         self.fail(f'Unexpected API: {path}')
 
     def gh(self, *args, **kwargs):
         self.commands.append(args)
-        if args[0] == 'api':
-            return json.dumps([[self.release] if self.release else []])
-        if args[:2] == ('release', 'create'):
-            self.release = {'id': 1, 'tag_name': 'v0.2.0', 'draft': True,
-                            'assets': [], 'html_url': 'https://example.invalid/release'}
-        elif args[:2] == ('release', 'upload'):
+        if args[1].startswith('https://uploads.github.com/'):
+            self.assertEqual(args[1], 'https://uploads.github.com/repos/owner/repo/releases/1/assets?name=' + self.rpm.name)
             asset = self.asset()
             if self.upload_bad_digest:
                 asset['digest'] = 'sha256:wrong'
             self.release['assets'] = [asset]
-        elif args[:2] == ('release', 'edit'):
-            self.latest = args[-1]
-            self.release['draft'] = False
-        else:
-            self.fail(f'Unexpected gh invocation: {args}')
-        return ''
+            return json.dumps(asset)
+        if args[0] == 'api':
+            return json.dumps([[self.release] if self.release else []])
+        self.fail(f'Unexpected gh invocation: {args}')
 
     def publish(self):
         publisher.publish('owner/repo', SHA, self.root)
@@ -158,9 +160,14 @@ class PublishTests(unittest.TestCase):
         self.publish()
         self.assertEqual(self.latest, '--latest=false')
 
+    def test_creation_does_not_require_draft_to_appear_in_listing(self):
+        with patch.object(publisher, 'find_release', return_value=None):
+            self.publish()
+        self.assertFalse(self.release['draft'])
+
     def test_incomplete_draft_can_be_resumed(self):
         self.tag_sha = SHA
-        self.gh('release', 'create')
+        self.api('repos/owner/repo/releases', {})
         self.publish()
         self.assertFalse(self.release['draft'])
 
