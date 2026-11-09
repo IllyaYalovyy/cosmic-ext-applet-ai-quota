@@ -44,6 +44,7 @@ class ReleasePolicyTests(unittest.TestCase):
         self.run_command('./scripts/install-git-hooks.sh')
         self.stage()
         self.run_command('git', 'commit', '-m', 'test: initial policy fixture')
+        self.run_command('./scripts/check-version.py', '--commit')
 
     def run_command(self, *args, success=True, env=None):
         result = subprocess.run(args, cwd=self.root, env=env or self.env,
@@ -123,6 +124,7 @@ class ReleasePolicyTests(unittest.TestCase):
         self.set_version(self.patch_version())
         self.stage()
         self.run_command('git', 'commit', '-m', 'test: valid patch')
+        self.run_command('./scripts/check-version.py', '--commit')
         self.assertEqual(self.run_command('git', 'log', '-1', '--format=%an <%ae>').strip(),
                          f'{AUTHOR} <{EMAIL}>')
 

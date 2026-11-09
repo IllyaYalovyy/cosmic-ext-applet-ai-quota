@@ -56,10 +56,10 @@ run_rust_checks() {
     cargo fmt --check
 
     log "Rust clippy"
-    cargo clippy --all-targets --all-features -- -D warnings
+    cargo clippy --locked --all-targets --all-features -- -D warnings
 
     log "Rust tests"
-    cargo test --all-targets --all-features
+    cargo test --locked --all-targets --all-features
 }
 
 run_node_checks() {

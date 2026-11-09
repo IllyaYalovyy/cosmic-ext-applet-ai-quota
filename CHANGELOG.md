@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.0 — 2026-11-09
+
+- Add GitHub Actions tests and Fedora 45 RPM builds for each pushed commit.
+- Publish verified main-branch RPMs automatically with immutable version tags and digest checks.
+- Exercise both renderer feature configurations, documentation tests, offscreen renders and RPM installation/removal.
+- Fix the offscreen test harness to compile with the software-only renderer.
+- Keep PR/branch validation read-only and isolate release permissions.
+- Add tested commit planning, committed-version checks and safe publication/retry logic.
+
 ## 0.1.2 — 2026-11-09
 
 - Record standing authorization to push and publish verified changes.

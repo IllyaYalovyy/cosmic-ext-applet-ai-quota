@@ -9,6 +9,7 @@ import xml.etree.ElementTree as ET
 
 root = Path(__file__).resolve().parent.parent
 staged = '--staged' in sys.argv
+committed = '--commit' in sys.argv
 
 
 def git(*args):
@@ -16,7 +17,9 @@ def git(*args):
 
 
 def read(path):
-    return git('show', ':' + path) if staged else (root / path).read_text()
+    if staged or committed:
+        return git('show', (':' if staged else 'HEAD:') + path)
+    return (root / path).read_text()
 
 
 def version_tuple(value):
@@ -38,9 +41,10 @@ if release is None or release.attrib['version'] != version:
 heading = next(line for line in read('CHANGELOG.md').splitlines() if line.startswith('## '))
 if not heading.startswith(f'## {version} '):
     sys.exit('Changelog version differs')
-if staged:
-    has_head = subprocess.run(['git', '-C', str(root), 'rev-parse', '--verify', 'HEAD'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
-    previous = tomllib.loads(git('show', 'HEAD:Cargo.toml'))['package'] if has_head else None
+if staged or committed:
+    base = 'HEAD' if staged else 'HEAD^'
+    has_head = subprocess.run(['git', '-C', str(root), 'rev-parse', '--verify', base], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+    previous = tomllib.loads(git('show', base + ':Cargo.toml'))['package'] if has_head else None
     if previous is not None:
         old = version_tuple(previous['version'])
         allowed = ((old[0] + 1, 0, 0), (old[0], old[1] + 1, 0), (old[0], old[1], old[2] + 1))

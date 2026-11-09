@@ -119,9 +119,10 @@ committing, and do not mix unrelated refactors with behavior changes.
 
 Standing user authorization (2026-11-09): always push completed, verified changes
 to origin/main and publish a GitHub release with the Fedora 45 RPM. Follow the
-quality gate and staged-diff review before committing. Build manually using
-scripts/build-release.sh, verify the uploaded RPM digest, and publish the
-matching version tag. Do not add CI/CD or leave finished work only locally.
+quality gate and staged-diff review before committing. GitHub Actions runs the
+full offline suite and builds/publishes each new main commit automatically. Observe the run to completion; repair failures
+before declaring the work done. scripts/build-release.sh remains available
+for local builds. No automatic commits or version bumps are made by CI.
 
 ## Versioning
 
@@ -134,4 +135,5 @@ commits, but each commit after the initial AI Quota import advances the version.
 Keep Cargo.toml, Cargo.lock, the newest AppStream release and CHANGELOG.md in
 sync. `scripts/check-version.py` validates them; the installed pre-commit hook
 also requires a higher version than HEAD. Release tags are `v<version>`.
-Manual releases only; do not add CI/CD without an explicit request.
+CI/CD was explicitly authorized on 2026-11-09. Only validated main commits
+publish public releases; pull requests and other branches publish workflow artifacts.

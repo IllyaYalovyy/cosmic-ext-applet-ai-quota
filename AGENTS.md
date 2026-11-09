@@ -59,8 +59,9 @@ Design review rules live in `docs/DESIGN-REVIEW.md`.
 - Inspect the staged diff before committing.
 - Keep commits coherent and reversible.
 - Standing user authorization: always push verified changes and publish a GitHub
-  release with the Fedora 45 RPM. Do not stop at a local commit. Keep releases
-  manual; do not add CI/CD. Verify the uploaded artifact checksum.
+  release with the Fedora 45 RPM. Do not stop at a local commit. GitHub Actions
+  now tests and publishes each main commit; observe the workflow through a
+  successful release and verify the uploaded artifact checksum.
 
 ## Prompt Templates
 

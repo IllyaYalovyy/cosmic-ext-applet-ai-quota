@@ -93,3 +93,11 @@ This checks static layout, not live Wayland popup input or real provider-version
 compatibility. Those still need a COSMIC session and signed-in clients; do not
 treat fixture tests as proof that future CLI releases preserve their protocol
 or token-free behavior.
+
+## CI coverage
+
+`.github/workflows/ci-release.yml` runs `scripts/ci-test.sh` for each selected
+commit, covering both feature configurations, doc tests and the ignored visual
+renderer. It also runs release-policy and CI planning/publication unit tests,
+then builds and installs/removes the Fedora RPM. See packaging/README.md for
+permissions, artifact retention, release gating, and rerun behavior.

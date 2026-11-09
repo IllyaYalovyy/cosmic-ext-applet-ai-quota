@@ -859,10 +859,10 @@ mod tests {
     }
 
     fn renderer() -> Renderer {
-        Renderer::Secondary(iced_tiny_skia::Renderer::new(
-            cosmic::font::default(),
-            Pixels(14.0),
-        ))
+        let renderer = iced_tiny_skia::Renderer::new(cosmic::font::default(), Pixels(14.0));
+        #[cfg(feature = "wgpu")]
+        let renderer = Renderer::Secondary(renderer);
+        renderer
     }
 
     fn layout(element: Element<'_, Message>, width: f32) -> Node {
@@ -1026,9 +1026,12 @@ mod tests {
             Cursor::Unavailable,
             &Rectangle::with_size(size),
         );
+        #[cfg(feature = "wgpu")]
         let Renderer::Secondary(renderer) = &mut renderer else {
             unreachable!("the test renderer is tiny-skia")
         };
+        #[cfg(not(feature = "wgpu"))]
+        let renderer = &mut renderer;
         let (w, h) = (size.width.ceil() as u32, size.height.ceil() as u32);
         let background = Color::from(theme.cosmic().background(false).base);
         let pixels = renderer.screenshot(Size::new(w, h), 1.0, background);
