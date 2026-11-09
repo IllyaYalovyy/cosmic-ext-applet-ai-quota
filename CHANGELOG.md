@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.2 — 2026-11-09
+
+- Record standing authorization to push and publish verified changes.
+- Publish the provider fixes and expanded tests from 0.1.1.
+
 ## 0.1.1 — 2026-11-08
 
 - Honor the live refresh interval in both providers and rate-limit repeated popup refreshes.

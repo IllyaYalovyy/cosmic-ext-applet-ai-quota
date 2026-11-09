@@ -23,6 +23,9 @@
     <binary>cosmic-ext-applet-ai-quota</binary>
   </provides>
   <releases>
+    <release version="0.1.2" date="2026-11-09">
+      <description><p>Publish provider correctness fixes and expanded regression coverage.</p></description>
+    </release>
     <release version="0.1.1" date="2026-11-08">
       <description><p>Correct provider cadence, failure backoff, quota selection and process safety; expand regression coverage.</p></description>
     </release>

@@ -68,7 +68,7 @@ last fetch is older than 15 s.
 Download the RPM from [Releases](https://github.com/IllyaYalovyy/cosmic-ext-applet-ai-quota/releases), then install:
 
 ```sh
-sudo dnf install ./cosmic-ext-applet-ai-quota-0.1.0-1.fc45.x86_64.rpm
+sudo dnf install ./cosmic-ext-applet-ai-quota-0.1.2-1.fc45.x86_64.rpm
 ```
 
 Add **AI Quota** in COSMIC Settings → Desktop → Panel (or Dock). The first

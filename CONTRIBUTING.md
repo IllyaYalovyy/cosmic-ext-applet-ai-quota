@@ -115,12 +115,13 @@ Use `docs/DESIGN-REVIEW.md` for RFC review before implementation.
 Follow `docs/COMMITS.md`. Keep commits coherent, inspect staged diffs before
 committing, and do not mix unrelated refactors with behavior changes.
 
-## Push Policy
+## Push and Release Policy
 
-Adopted 2026-07-24: completed, verified work is always committed and pushed
-to `origin/main`. Do not leave finished work sitting uncommitted or
-unpushed. The quality gate and the staging checklist in `docs/COMMITS.md`
-still apply before every commit — "always push" is not "push broken work."
+Standing user authorization (2026-11-09): always push completed, verified changes
+to origin/main and publish a GitHub release with the Fedora 45 RPM. Follow the
+quality gate and staged-diff review before committing. Build manually using
+scripts/build-release.sh, verify the uploaded RPM digest, and publish the
+matching version tag. Do not add CI/CD or leave finished work only locally.
 
 ## Versioning
 

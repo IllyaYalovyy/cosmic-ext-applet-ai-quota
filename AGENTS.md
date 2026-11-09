@@ -58,7 +58,9 @@ Design review rules live in `docs/DESIGN-REVIEW.md`.
   `./scripts/install-git-hooks.sh` after cloning or reinitializing the project.
 - Inspect the staged diff before committing.
 - Keep commits coherent and reversible.
-- Do not push unless explicitly instructed.
+- Standing user authorization: always push verified changes and publish a GitHub
+  release with the Fedora 45 RPM. Do not stop at a local commit. Keep releases
+  manual; do not add CI/CD. Verify the uploaded artifact checksum.
 
 ## Prompt Templates
 
