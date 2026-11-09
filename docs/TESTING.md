@@ -63,3 +63,33 @@ test_update
 manager_returns_true
 component_renders
 ```
+
+## Provider review regressions
+
+All automatic tests use captured, sanitized data and offline fake executables;
+they do not read personal provider credentials or start model turns.
+
+- `source.rs`: 30-second and ten-minute intervals, repeated popup opens, live
+  cadence changes, and manual refresh bypass through both providers.
+- `claude.rs`: nonzero exit with model-cost evidence, zero-cost failures,
+  permanent tripwire latch, cold-start give-up/manual recovery, output limits,
+  timeouts, and process reaping.
+- `codex.rs`: model-only quotas, request method allowlist, notifications,
+  initialization responses, EOF/server/protocol errors, output limits and cleanup.
+- `window.rs`: retained-data failure backoff, success recovery, stale generations,
+  skipped ticks, and coalescing repeated manual requests.
+- `tests/test_release_policy.py`: real isolated Git hooks, accepted version bumps,
+  mismatched/staged metadata, author restrictions and inherited hook chaining.
+  The quality gate runs these with standard-library unittest; pytest is not needed.
+
+Run the optional renderer:
+
+```sh
+AI_QUOTA_RENDER_DIR=/tmp/ai-quota-review cargo test render_states -- --ignored
+```
+
+Inspect the generated PAM files, or convert them to PNG with ImageMagick.
+This checks static layout, not live Wayland popup input or real provider-version
+compatibility. Those still need a COSMIC session and signed-in clients; do not
+treat fixture tests as proof that future CLI releases preserve their protocol
+or token-free behavior.

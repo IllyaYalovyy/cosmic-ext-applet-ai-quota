@@ -13,6 +13,9 @@ use std::time::Duration;
 
 use serde::Deserialize;
 use serde_json::{Map, Value};
+use tokio::io::AsyncReadExt;
+
+use crate::source::MAX_PROVIDER_OUTPUT_BYTES;
 
 /// Failure taxonomy shared by both providers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -349,27 +352,55 @@ pub async fn refresh_cache(config: &ClaudeConfig) -> Result<(), RefreshFailure> 
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .kill_on_drop(true);
-    let output = match tokio::time::timeout(config.refresh_timeout, process.output()).await {
-        Ok(Ok(output)) => output,
-        Ok(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+    let mut child = match process.spawn() {
+        Ok(child) => child,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             return Err(failure(RefreshError::NotInstalled, None));
         }
-        Ok(Err(_)) => return Err(failure(RefreshError::RefreshFailed, Some("spawn-failed"))),
-        Err(_) => return Err(failure(RefreshError::RefreshFailed, Some("timeout"))),
+        Err(_) => return Err(failure(RefreshError::RefreshFailed, Some("spawn-failed"))),
     };
-    if !output.status.success() {
-        return Err(failure(RefreshError::RefreshFailed, Some("nonzero-exit")));
-    }
-    classify_envelope(&output.stdout).map_err(|(error, reason)| failure(error, reason))
+    let exchange = async {
+        let Some(stdout) = child.stdout.take() else {
+            return Err(failure(RefreshError::RefreshFailed, Some("no-pipes")));
+        };
+        let mut bytes = Vec::new();
+        stdout
+            .take(MAX_PROVIDER_OUTPUT_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .await
+            .map_err(|_| failure(RefreshError::RefreshFailed, Some("read-failed")))?;
+        if bytes.len() as u64 > MAX_PROVIDER_OUTPUT_BYTES {
+            return Err(failure(
+                RefreshError::RefreshFailed,
+                Some("output-too-large"),
+            ));
+        }
+        let status = child
+            .wait()
+            .await
+            .map_err(|_| failure(RefreshError::RefreshFailed, Some("wait-failed")))?;
+        let verdict = classify_envelope(&bytes);
+        // A failed CLI can still report model use: never hide that behind its exit status.
+        if let Err((RefreshError::ModelInvoked, reason)) = verdict {
+            return Err(failure(RefreshError::ModelInvoked, reason));
+        }
+        if !status.success() {
+            return Err(failure(RefreshError::RefreshFailed, Some("nonzero-exit")));
+        }
+        verdict.map_err(|(error, reason)| failure(error, reason))
+    };
+    let result = match tokio::time::timeout(config.refresh_timeout, exchange).await {
+        Ok(result) => result,
+        Err(_) => Err(failure(RefreshError::RefreshFailed, Some("timeout"))),
+    };
+    // Explicitly reap on every exit path, including timeout and output overflow.
+    let _ = child.kill().await;
+    result
 }
 
 // ---------------------------------------------------------------------------
 // Policy: when to spawn
 // ---------------------------------------------------------------------------
-
-/// The staleness threshold that triggers a refresh spawn; the poll
-/// interval, which also spaces spawns at least one poll apart.
-pub const DEFAULT_REFRESH_AFTER_MS: i64 = 60_000;
 
 /// #19 polite give-up: consecutive refresh spawns that still leave the file
 /// read in error before auto-spawning suspends (manual re-arms).
@@ -377,7 +408,7 @@ pub const MAX_INEFFECTIVE_REFRESHES: u32 = 3;
 
 pub struct ClaudeSource {
     config: ClaudeConfig,
-    refresh_after_ms: i64,
+    last_attempt_at: Option<i64>,
     /// The G1 tripwire latch, shared with the applet so a settings change
     /// re-arms (or disables) the path without locking the source.
     refresh_disabled: Arc<AtomicBool>,
@@ -390,7 +421,7 @@ impl ClaudeSource {
     pub fn new(config: ClaudeConfig, refresh_disabled: Arc<AtomicBool>) -> Self {
         Self {
             config,
-            refresh_after_ms: DEFAULT_REFRESH_AFTER_MS,
+            last_attempt_at: None,
             refresh_disabled,
             ineffective_refreshes: 0,
             last_refresh_failed: false,
@@ -411,14 +442,15 @@ impl ClaudeSource {
         self.refresh_disabled.load(Ordering::Relaxed)
     }
 
-    pub async fn fetch(&mut self, now: i64, manual: bool) -> ClaudeSnapshot {
+    pub async fn fetch(&mut self, now: i64, manual: bool, refresh_after_ms: i64) -> ClaudeSnapshot {
         if manual {
             self.ineffective_refreshes = 0;
         }
         let snapshot = fetch_snapshot(&self.config.file_path, now).await;
-        if !self.wants_refresh(&snapshot, now, manual) {
+        if !self.wants_refresh(&snapshot, now, manual, refresh_after_ms) {
             return snapshot;
         }
+        self.last_attempt_at = Some(now);
         match refresh_cache(&self.config).await {
             Ok(()) => {
                 self.last_refresh_failed = false;
@@ -436,17 +468,29 @@ impl ClaudeSource {
         refreshed
     }
 
-    fn wants_refresh(&self, snapshot: &ClaudeSnapshot, now: i64, manual: bool) -> bool {
+    fn wants_refresh(
+        &self,
+        snapshot: &ClaudeSnapshot,
+        now: i64,
+        manual: bool,
+        refresh_after_ms: i64,
+    ) -> bool {
         if self.refresh_disabled() {
             return false;
         }
         if manual {
             return true;
         }
+        if self
+            .last_attempt_at
+            .is_some_and(|at| now.saturating_sub(at) < refresh_after_ms)
+        {
+            return false;
+        }
         if snapshot.is_error() {
             return self.ineffective_refreshes < MAX_INEFFECTIVE_REFRESHES;
         }
-        now - snapshot.fetched_at > self.refresh_after_ms
+        now.saturating_sub(snapshot.fetched_at) >= refresh_after_ms
     }
 
     fn count_refresh_effect(&mut self, snapshot: &ClaudeSnapshot) {
@@ -646,18 +690,107 @@ mod tests {
         };
         let mut source = ClaudeSource::new(config.clone(), Arc::new(AtomicBool::new(false)));
         // Fresh cache: no spawn, last_refresh_failed untouched.
-        let snapshot = source.fetch(1784959900803 + 1_000, false).await;
+        let snapshot = source.fetch(1784959900803 + 1_000, false, 60_000).await;
         assert_eq!(snapshot.error, None);
         assert!(!source.last_refresh_failed());
         // Stale cache: the spawn runs (and fails), the file is still served.
-        let snapshot = source.fetch(1784959900803 + 10 * 60_000, false).await;
+        let snapshot = source
+            .fetch(1784959900803 + 10 * 60_000, false, 60_000)
+            .await;
         assert_eq!(snapshot.error, None);
         assert!(source.last_refresh_failed());
         // Disabled path: never spawns even when manual.
         let mut disabled = ClaudeSource::new(config, Arc::new(AtomicBool::new(true)));
-        let snapshot = disabled.fetch(1784959900803 + 10 * 60_000, true).await;
+        let snapshot = disabled
+            .fetch(1784959900803 + 10 * 60_000, true, 60_000)
+            .await;
         assert_eq!(snapshot.error, None);
         assert!(!disabled.last_refresh_failed());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+    #[tokio::test]
+    async fn nonzero_exit_does_not_hide_a_model_cost_envelope() {
+        let mut payload: Value = serde_json::from_str(ENVELOPE).unwrap();
+        payload["total_cost_usd"] = serde_json::json!(1);
+        assert_eq!(
+            classify_envelope(payload.to_string().as_bytes())
+                .unwrap_err()
+                .0,
+            RefreshError::ModelInvoked
+        );
+        let config = ClaudeConfig {
+            file_path: PathBuf::from("/nonexistent/unused-cache"),
+            refresh_argv: vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                "printf '%s' \"$1\"; exit 7".into(),
+                "fake".into(),
+                payload.to_string(),
+            ],
+            refresh_timeout: Duration::from_secs(5),
+        };
+        let failure = refresh_cache(&config).await.unwrap_err();
+        assert_eq!(failure.error, RefreshError::ModelInvoked);
+        let disabled = Arc::new(AtomicBool::new(false));
+        let mut source = ClaudeSource::new(config, Arc::clone(&disabled));
+        source.fetch(1, true, 60_000).await;
+        assert!(disabled.load(Ordering::Relaxed));
+    }
+    #[tokio::test]
+    async fn oversized_and_timed_out_refreshes_are_killed_and_reaped() {
+        use crate::test_support::{TestDir, assert_reaped, fake_cli};
+        let dir = TestDir::new();
+        for (mode, reason) in [("oversized", "output-too-large"), ("hang", "timeout")] {
+            let record = dir.join(mode);
+            let config = ClaudeConfig {
+                file_path: dir.join("unused"),
+                refresh_argv: fake_cli(mode, &record),
+                refresh_timeout: Duration::from_secs(2),
+            };
+            let failure = refresh_cache(&config).await.unwrap_err();
+            assert_eq!(failure.reason, Some(reason));
+            assert_reaped(&record);
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_but_zero_cost_refresh_keeps_its_nonzero_exit_reason() {
+        let mut payload: Value = serde_json::from_str(ENVELOPE).unwrap();
+        payload["is_error"] = Value::Bool(true);
+        let config = ClaudeConfig {
+            file_path: PathBuf::from("/nonexistent/unused"),
+            refresh_argv: vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                "printf '%s' \"$1\"; exit 7".into(),
+                "fake".into(),
+                payload.to_string(),
+            ],
+            refresh_timeout: Duration::from_secs(5),
+        };
+        let failure = refresh_cache(&config).await.unwrap_err();
+        assert_eq!(failure.error, RefreshError::RefreshFailed);
+        assert_eq!(failure.reason, Some("nonzero-exit"));
+    }
+
+    #[tokio::test]
+    async fn unavailable_source_stops_after_three_attempts_and_manual_rearms() {
+        let mut source = ClaudeSource::new(
+            ClaudeConfig {
+                file_path: PathBuf::from("/nonexistent/unused-cache"),
+                refresh_argv: vec!["/bin/false".into()],
+                refresh_timeout: Duration::from_secs(5),
+            },
+            Arc::new(AtomicBool::new(false)),
+        );
+        for now in [0, 60_000, 120_000] {
+            assert!(source.fetch(now, false, 60_000).await.is_error());
+        }
+        assert_eq!(source.ineffective_refreshes, 3);
+        source.fetch(180_000, false, 60_000).await;
+        assert_eq!(source.last_attempt_at, Some(120_000));
+        source.fetch(180_001, true, 60_000).await;
+        assert_eq!(source.last_attempt_at, Some(180_001));
+        assert_eq!(source.ineffective_refreshes, 1);
     }
 }

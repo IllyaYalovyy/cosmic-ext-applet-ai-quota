@@ -30,3 +30,6 @@ pub(crate) fn now_ms() -> i64 {
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
 }
+
+#[cfg(test)]
+mod test_support;

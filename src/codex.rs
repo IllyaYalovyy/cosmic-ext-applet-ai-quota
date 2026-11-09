@@ -7,7 +7,9 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use serde_json::{Map, Value};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+
+use crate::source::MAX_PROVIDER_OUTPUT_BYTES;
 
 use crate::claude::{ProviderError, resolve_cli_default};
 
@@ -219,17 +221,13 @@ pub fn parse_codex_rate_limits(result: &Value, now: i64) -> CodexSnapshot {
                 .iter()
                 .find(|b| b.limit_id == "codex")
                 .or_else(|| buckets.iter().find(|b| b.limit_name.is_none()))
-                .or_else(|| buckets.first())
                 .map(|b| b.limit_id.clone())
         });
-    let Some(main_limit_id) = main_limit_id else {
-        return CodexSnapshot::failed(now, ProviderError::NotAuthenticated, None);
-    };
 
     // Keep the main bucket first, then unlabelled compatibility buckets,
     // then named model buckets (stable, like the JS sort).
     buckets.sort_by_key(|bucket| {
-        if bucket.limit_id == main_limit_id {
+        if Some(bucket.limit_id.as_str()) == main_limit_id.as_deref() {
             0
         } else if bucket.limit_name.is_none() {
             1
@@ -243,7 +241,7 @@ pub fn parse_codex_rate_limits(result: &Value, now: i64) -> CodexSnapshot {
     }
     CodexSnapshot {
         fetched_at: now,
-        main_limit_id: Some(main_limit_id),
+        main_limit_id,
         access,
         reset_credits_available: reset_credits,
         windows,
@@ -339,17 +337,19 @@ pub async fn fetch_codex_snapshot(config: &CodexConfig, now: i64) -> CodexSnapsh
             return CodexSnapshot::failed(now, ProviderError::ReadFailed, Some("write-failed"));
         }
         let _ = stdin.flush().await;
-        let mut lines = BufReader::new(stdout).lines();
+        let mut reader = BufReader::new(stdout.take(MAX_PROVIDER_OUTPUT_BYTES + 1));
+        let mut received = 0_u64;
         loop {
-            let line = match lines.next_line().await {
-                Ok(Some(line)) => line,
-                Ok(None) => {
+            let mut line = Vec::new();
+            let count = match reader.read_until(b'\n', &mut line).await {
+                Ok(0) => {
                     return CodexSnapshot::failed(
                         now,
                         ProviderError::ReadFailed,
                         Some("early-eof"),
                     );
                 }
+                Ok(count) => count,
                 Err(_) => {
                     return CodexSnapshot::failed(
                         now,
@@ -358,7 +358,15 @@ pub async fn fetch_codex_snapshot(config: &CodexConfig, now: i64) -> CodexSnapsh
                     );
                 }
             };
-            let Ok(message) = serde_json::from_str::<Value>(&line) else {
+            received += count as u64;
+            if received > MAX_PROVIDER_OUTPUT_BYTES {
+                return CodexSnapshot::failed(
+                    now,
+                    ProviderError::ReadFailed,
+                    Some("output-too-large"),
+                );
+            }
+            let Ok(message) = serde_json::from_slice::<Value>(&line) else {
                 return CodexSnapshot::failed(now, ProviderError::ReadFailed, Some("bad-json"));
             };
             if message.get("id").and_then(Value::as_u64) != Some(REQUEST_ID) {
@@ -388,12 +396,11 @@ pub async fn fetch_codex_snapshot(config: &CodexConfig, now: i64) -> CodexSnapsh
 // Policy
 // ---------------------------------------------------------------------------
 
-pub const DEFAULT_CODEX_REFRESH_AFTER_MS: i64 = 60_000;
 pub const MAX_CODEX_INEFFECTIVE_REFRESHES: u32 = 3;
 
 pub struct CodexSource {
     config: CodexConfig,
-    refresh_after_ms: i64,
+    last_attempt_at: Option<i64>,
     last_good: Option<CodexSnapshot>,
     last_failure: Option<CodexSnapshot>,
     last_warned: Option<String>,
@@ -405,7 +412,7 @@ impl CodexSource {
     pub fn new(config: CodexConfig) -> Self {
         Self {
             config,
-            refresh_after_ms: DEFAULT_CODEX_REFRESH_AFTER_MS,
+            last_attempt_at: None,
             last_good: None,
             last_failure: None,
             last_warned: None,
@@ -421,17 +428,18 @@ impl CodexSource {
     /// Query the App Server at the configured cadence, retain the last
     /// successful snapshot across transient failures, and stop repeated
     /// process attempts after three initial failures (manual re-arms).
-    pub async fn fetch(&mut self, now: i64, manual: bool) -> CodexSnapshot {
+    pub async fn fetch(&mut self, now: i64, manual: bool, refresh_after_ms: i64) -> CodexSnapshot {
         if manual {
             self.ineffective_refreshes = 0;
         }
-        if !self.wants_refresh(now, manual) {
+        if !self.wants_refresh(now, manual, refresh_after_ms) {
             return self
                 .last_good
                 .clone()
                 .or_else(|| self.last_failure.clone())
                 .unwrap_or_else(|| CodexSnapshot::failed(now, ProviderError::ReadFailed, None));
         }
+        self.last_attempt_at = Some(now);
         self.apply(fetch_codex_snapshot(&self.config, now).await)
     }
 
@@ -462,13 +470,19 @@ impl CodexSource {
         snapshot
     }
 
-    fn wants_refresh(&self, now: i64, manual: bool) -> bool {
+    fn wants_refresh(&self, now: i64, manual: bool, refresh_after_ms: i64) -> bool {
         if manual {
             return true;
         }
+        if self
+            .last_attempt_at
+            .is_some_and(|at| now.saturating_sub(at) < refresh_after_ms)
+        {
+            return false;
+        }
         match &self.last_good {
             None => self.ineffective_refreshes < MAX_CODEX_INEFFECTIVE_REFRESHES,
-            Some(good) => now - good.fetched_at >= self.refresh_after_ms,
+            Some(good) => now.saturating_sub(good.fetched_at) >= refresh_after_ms,
         }
     }
 
@@ -579,17 +593,17 @@ mod tests {
         assert_eq!(source.apply(failure.clone()), good);
         assert!(source.last_refresh_failed());
         // Cadence: no re-query before the interval, re-query after it.
-        assert!(!source.wants_refresh(100 + 30_000, false));
-        assert!(source.wants_refresh(100 + 60_000, false));
-        assert!(source.wants_refresh(100, true));
+        assert!(!source.wants_refresh(100 + 30_000, false, 60_000));
+        assert!(source.wants_refresh(100 + 60_000, false, 60_000));
+        assert!(source.wants_refresh(100, true, 60_000));
 
         let mut cold = CodexSource::new(CodexConfig::default());
         for _ in 0..MAX_CODEX_INEFFECTIVE_REFRESHES {
-            assert!(cold.wants_refresh(0, false));
+            assert!(cold.wants_refresh(0, false, 60_000));
             assert_eq!(cold.apply(failure.clone()), failure);
         }
-        assert!(!cold.wants_refresh(0, false));
-        assert!(cold.wants_refresh(0, true));
+        assert!(!cold.wants_refresh(0, false, 60_000));
+        assert!(cold.wants_refresh(0, true, 60_000));
     }
 
     #[tokio::test]
@@ -642,5 +656,85 @@ mod tests {
             assert!(!alive, "hung app-server {pid} still running");
         }
         let _ = std::fs::remove_file(pid_file);
+    }
+    #[test]
+    fn model_only_buckets_never_become_the_overall_quota() {
+        let result = serde_json::json!({
+            "rateLimitsByLimitId": {
+                "spark": {"limitId": "spark", "limitName": "Spark",
+                          "primary": {"usedPercent": 100}}
+            }
+        });
+        let snapshot = parse_codex_rate_limits(&result, 10);
+        assert_eq!(snapshot.error, None);
+        assert_eq!(snapshot.main_limit_id, None);
+        assert_eq!(snapshot.windows.len(), 1);
+        assert!(crate::model::codex_constraint(&snapshot).is_none());
+        let full = crate::source::Snapshot {
+            claude: crate::claude::ClaudeSnapshot::failed(10, ProviderError::NotInstalled),
+            codex: snapshot,
+        };
+        let options = crate::model::Options::default();
+        let indicator = crate::model::indicator_model(Some(&full), 10, &options);
+        assert_eq!(indicator.items[1].state, crate::model::State::Unavailable);
+        assert_eq!(indicator.items[1].percent, None);
+        let menu = crate::model::menu_model(Some(&full), 10, &options);
+        assert!(
+            menu.groups
+                .iter()
+                .any(|group| group.title == "Codex" && !group.sections.is_empty())
+        );
+    }
+
+    #[test]
+    fn request_contains_only_initialization_and_quota_read() {
+        let messages: Vec<Value> = request_text()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let methods: Vec<_> = messages
+            .iter()
+            .map(|m| m["method"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            methods,
+            ["initialize", "initialized", "account/rateLimits/read"]
+        );
+        assert_eq!(messages[2]["id"], REQUEST_ID);
+    }
+    #[tokio::test]
+    async fn bounded_protocol_failures_and_cleanup() {
+        use crate::test_support::{TestDir, assert_reaped, fake_cli};
+        let dir = TestDir::new();
+        for (mode, reason) in [
+            ("oversized", "output-too-large"),
+            ("hang", "timeout"),
+            ("early-eof", "early-eof"),
+            ("server-error", "server-error"),
+            ("missing-result", "server-error"),
+        ] {
+            let record = dir.join(mode);
+            let config = CodexConfig {
+                app_server_argv: fake_cli(&format!("codex-{mode}"), &record),
+                timeout: Duration::from_secs(2),
+            };
+            let snapshot = fetch_codex_snapshot(&config, 42).await;
+            assert_eq!(snapshot.error, Some(ProviderError::ReadFailed));
+            assert_eq!(snapshot.reason, Some(reason), "{mode}");
+            assert_reaped(&record);
+        }
+    }
+
+    #[tokio::test]
+    async fn notifications_and_initialization_do_not_hide_the_quota_reply() {
+        use crate::test_support::{TestDir, assert_reaped, fake_cli};
+        let dir = TestDir::new();
+        let record = dir.join("pid");
+        let config = CodexConfig {
+            app_server_argv: fake_cli("codex-quota", &record),
+            timeout: Duration::from_secs(5),
+        };
+        assert_eq!(fetch_codex_snapshot(&config, 42).await.error, None);
+        assert_reaped(&record);
     }
 }

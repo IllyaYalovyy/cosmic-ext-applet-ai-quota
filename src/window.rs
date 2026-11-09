@@ -225,7 +225,10 @@ impl Application for Window {
                 }
                 self.in_flight = false;
                 self.manual_in_flight = false;
-                let event = if output.snapshot.has_error() {
+                let event = if output.snapshot.has_error()
+                    || output.last_refresh_failed.claude
+                    || output.last_refresh_failed.codex
+                {
                     Event::Failure
                 } else {
                     Event::Success
@@ -368,8 +371,15 @@ impl Window {
         let generation = self.generation;
         let source = Arc::clone(&self.source);
         let now = now_ms();
+        let interval_seconds = self.settings.refresh_interval_seconds;
         Task::perform(
-            async move { source.lock().await.fetch(now, manual).await },
+            async move {
+                source
+                    .lock()
+                    .await
+                    .fetch(now, manual, interval_seconds)
+                    .await
+            },
             move |output| Message::Fetched(generation, output).into(),
         )
     }
@@ -1118,5 +1128,88 @@ mod tests {
             }
         }
         let _ = width;
+    }
+    #[test]
+    fn cached_data_does_not_hide_refresh_failures_from_backoff() {
+        for failed in [
+            RefreshFailed {
+                claude: true,
+                codex: false,
+            },
+            RefreshFailed {
+                claude: false,
+                codex: true,
+            },
+        ] {
+            let mut window = sample_window(None);
+            for expected in [60, 120, 300] {
+                let generation = window.generation;
+                let _ = window.update(Message::Fetched(
+                    generation,
+                    FetchOutput {
+                        snapshot: sample_snapshot(5),
+                        last_refresh_failed: failed,
+                        claude_refresh_disabled: false,
+                    },
+                ));
+                assert_eq!(window.backoff.delay_sec, expected);
+            }
+            let generation = window.generation;
+            let _ = window.update(Message::Fetched(
+                generation,
+                FetchOutput {
+                    snapshot: sample_snapshot(5),
+                    last_refresh_failed: RefreshFailed::default(),
+                    claude_refresh_disabled: false,
+                },
+            ));
+            assert_eq!(window.backoff.failures, 0);
+        }
+    }
+    #[test]
+    fn stale_results_and_timer_ticks_cannot_replace_an_in_flight_request() {
+        let mut window = sample_window(None);
+        window.in_flight = true;
+        window.generation = 7;
+        let _ = window.update(Message::Tick);
+        assert!(!window.refetch_queued);
+        let _ = window.update(Message::Fetched(
+            6,
+            FetchOutput {
+                snapshot: sample_snapshot(5),
+                last_refresh_failed: RefreshFailed::default(),
+                claude_refresh_disabled: true,
+            },
+        ));
+        assert!(window.in_flight);
+        assert!(window.snapshot.is_none());
+        assert!(!window.settings.refresh_path_disabled);
+        assert_eq!(window.generation, 7);
+    }
+
+    #[test]
+    fn repeated_manual_clicks_queue_exactly_one_followup() {
+        let mut window = sample_window(None);
+        window.in_flight = true;
+        window.generation = 1;
+        for _ in 0..5 {
+            let _ = window.update(Message::RefreshNow);
+        }
+        let output = FetchOutput {
+            snapshot: sample_snapshot(5),
+            last_refresh_failed: RefreshFailed::default(),
+            claude_refresh_disabled: false,
+        };
+        let _ = window.update(Message::Fetched(1, output.clone()));
+        assert_eq!(window.generation, 2);
+        assert!(window.manual_pending());
+        for _ in 0..5 {
+            let _ = window.update(Message::RefreshNow);
+        }
+        let _ = window.update(Message::Fetched(2, output));
+        assert_eq!(window.generation, 2);
+        assert!(!window.in_flight);
+        assert!(!window.manual_pending());
+        assert!(!window.refetch_queued);
     }
 }

@@ -1,0 +1,36 @@
+#!/usr/bin/env python3
+"""Offline provider process for bounded-output, cadence and cleanup tests."""
+import json
+import os
+from pathlib import Path
+import sys
+import time
+
+mode, record = sys.argv[1:3]
+fixtures = Path(__file__).resolve().parent.parent
+Path(record).write_text(str(os.getpid()))
+if mode.startswith('codex-'):
+    messages = [json.loads(sys.stdin.readline()) for _ in range(3)]
+    assert [m['method'] for m in messages] == [
+        'initialize', 'initialized', 'account/rateLimits/read']
+    mode = mode.removeprefix('codex-')
+if mode == 'hang':
+    time.sleep(60)
+elif mode == 'oversized':
+    sys.stdout.buffer.write(b'x' * (1024 * 1024 + 2))
+    sys.stdout.flush()
+    time.sleep(60)
+elif mode == 'ok':
+    print((fixtures / 'claude-p-usage-result.json').read_text())
+elif mode == 'quota':
+    print(json.dumps({'method': 'test/notification'}))
+    print(json.dumps({'id': 0, 'result': {}}))
+    print((fixtures / 'codex-app-server-response.json').read_text())
+elif mode == 'early-eof':
+    pass
+elif mode == 'server-error':
+    print(json.dumps({'id': 2, 'error': {'code': -32000, 'message': 'test'}}))
+elif mode == 'missing-result':
+    print(json.dumps({'id': 2}))
+else:
+    raise SystemExit('unsupported test mode')
