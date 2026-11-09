@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.2 — 2026-11-09
+
+- Install documentation payloads in the minimal Fedora CI image so the RPM smoke test verifies bundled source archives.
+
 ## 0.2.1 — 2026-11-09
 
 - Trust the mounted CI checkout explicitly so Git validation works inside the Fedora container.

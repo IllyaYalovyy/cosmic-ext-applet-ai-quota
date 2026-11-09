@@ -6,7 +6,8 @@ version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"
 name=cosmic-ext-applet-ai-quota
 rpm_file="$PWD/dist/$version/$name-$version-1.fc45.x86_64.rpm"
 (cd "dist/$version" && sha256sum --check SHA256SUMS)
-dnf -y install "$rpm_file"
+# Minimal Fedora images default to tsflags=nodocs; verify the full payload.
+dnf -y --setopt=tsflags= install "$rpm_file"
 rpm -V "$name"
 ldd "/usr/bin/$name" | tee "$RUNNER_TEMP/ai-quota-ldd.txt"
 if grep -q 'not found' "$RUNNER_TEMP/ai-quota-ldd.txt"; then exit 1; fi
