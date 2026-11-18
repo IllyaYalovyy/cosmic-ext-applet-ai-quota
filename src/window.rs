@@ -40,11 +40,9 @@ use crate::source::{FetchOutput, MultiSource, RefreshFailed, Snapshot};
 /// §5: opening the popup refreshes if the last fetch is older than 15 s.
 const OPEN_REFRESH_MAX_AGE_MS: i64 = 15_000;
 
-/// §4.1: the viewport is fixed so data can never resize it.
-const POPUP_WIDTH: f32 = 320.0;
-const POPUP_MAX_HEIGHT: f32 = 640.0;
-/// Height the scrolling body is capped at; the footer stays reachable below.
-const MAX_BODY_HEIGHT: f32 = 500.0;
+/// Prefer COSMIC’s standard width; grow vertically with the quota content.
+const POPUP_WIDTH: f32 = 360.0;
+const POPUP_MAX_HEIGHT: f32 = 1000.0;
 
 /// §3.1 geometry in logical pixels at the 16 px reference size.
 const UNIT_GAP: f32 = 4.0;
@@ -199,6 +197,8 @@ impl Application for Window {
                     .applet
                     .get_popup_settings(parent, new_id, None, None, None);
                 popup_settings.positioner.size_limits = popup_limits();
+                // Allow the compositor to fit the popup on constrained outputs.
+                popup_settings.positioner.constraint_adjustment |= 16 | 32;
                 let mut tasks = vec![get_popup(popup_settings)];
                 // §5: implicit refresh on open, not a manual one — the
                 // sources' own gates decide any spawn and no spinner runs.
@@ -466,7 +466,7 @@ impl Window {
         }
     }
 
-    /// The §4 dropdown: promoted lines, notice, grouped sections, footer.
+    /// Quota groups and footer share a viewport only when the content cannot fit.
     fn usage_view(&self) -> Element<'_, Message> {
         let model = menu_model(self.snapshot.as_ref(), now_ms(), &self.options());
         let colors = self.theme_colors();
@@ -475,17 +475,6 @@ impl Window {
         let mut body = widget::Column::new().spacing(0).width(Length::Fill);
         let mut blocks: Vec<Element<'_, Message>> = Vec::new();
 
-        if !model.promoted.is_empty() {
-            let mut promoted = widget::Column::new().spacing(4).padding([6, 0]);
-            for line in &model.promoted {
-                promoted = promoted.push(
-                    widget::text::body(line.clone())
-                        .class(cosmic::theme::Text::Color(colors.destructive))
-                        .width(Length::Fill),
-                );
-            }
-            blocks.push(promoted.into());
-        }
         if let Some(notice) = &model.notice {
             blocks.push(
                 widget::Column::new()
@@ -510,17 +499,13 @@ impl Window {
             body = body.push(block);
         }
 
-        widget::Column::new()
-            .spacing(8)
-            .width(Length::Fill)
-            .push(
-                widget::container(widget::scrollable(body).spacing(8))
-                    .max_height(MAX_BODY_HEIGHT)
-                    .width(Length::Fill),
-            )
-            .push(widget::divider::horizontal::default())
-            .push(self.footer(&model.footer, &colors, dim))
-            .into()
+        widget::scrollable(
+            body.spacing(6)
+                .push(widget::divider::horizontal::default())
+                .push(self.footer(&model.footer, &colors, dim)),
+        )
+        .spacing(6)
+        .into()
     }
 
     fn group_view<'a>(
@@ -547,35 +532,33 @@ impl Window {
 
         let mut column = widget::Column::new().width(Length::Fill).push(heading);
         for section in &group.sections {
-            if let Some(bucket) = &section.bucket_title {
-                column = column.push(
-                    widget::container(widget::text::heading(bucket.clone()).width(Length::Fill))
-                        .padding([8, 0, 0, 0]),
-                );
-            }
+            let title = match &section.bucket_title {
+                Some(bucket) => format!("{bucket} · {}", section.title),
+                None => section.title.clone(),
+            };
             let track = with_alpha(colors.foreground, TRACK_ALPHA);
-            let bar_row = widget::Row::new()
+            let label_row = widget::Row::new()
                 .spacing(8)
                 .align_y(Vertical::Center)
-                .push(bar(section.percent, colors.bar(section.bar_state), track))
+                .push(
+                    widget::text::body(title)
+                        .font(cosmic::font::semibold())
+                        .width(Length::Fill),
+                )
                 .push(
                     widget::text::body(section.percent_text.clone())
                         .width(Length::Fixed(42.0))
                         .align_x(Horizontal::Right),
                 );
             let mut block = widget::Column::new()
-                .spacing(7)
+                .spacing(4)
                 .width(Length::Fill)
-                .padding([7, 0, 9, 0])
-                .push(
-                    widget::text::body(section.title.clone())
-                        .font(cosmic::font::semibold())
-                        .width(Length::Fill),
-                )
-                .push(bar_row);
+                .padding([5, 0, 6, 0])
+                .push(label_row)
+                .push(bar(section.percent, colors.bar(section.bar_state), track));
             if let Some(reset) = &section.reset_text {
                 block = block.push(
-                    widget::text::body(reset.clone())
+                    widget::text::caption(reset.clone())
                         .class(cosmic::theme::Text::Color(dim))
                         .width(Length::Fill),
                 );
@@ -866,10 +849,15 @@ mod tests {
     }
 
     fn layout(element: Element<'_, Message>, width: f32) -> Node {
+        layout_at_height(element, width, f32::INFINITY)
+    }
+
+    fn layout_at_height(element: Element<'_, Message>, width: f32, height: f32) -> Node {
         let mut element = element;
         let mut tree = Tree::new(element.as_widget());
         let limits = cosmic::iced::advanced::layout::Limits::NONE
             .max_width(width)
+            .max_height(height)
             .width(Length::Shrink);
         element
             .as_widget_mut()
@@ -907,6 +895,52 @@ mod tests {
             "{}",
             settings.size().width
         );
+    }
+
+    #[test]
+    fn normal_and_limit_hit_popups_fit_without_scrolling() {
+        let now = now_ms();
+        for limit_hit in [false, true] {
+            let mut snapshot = sample_snapshot(now);
+            if limit_hit {
+                snapshot.claude.session.as_mut().unwrap().percent = 100.0;
+                snapshot.codex.windows[0].percent = 100.0;
+            }
+            let window = sample_window(Some(snapshot));
+            let node = layout_at_height(window.usage_view(), body_width(), 800.0);
+            let content = &node.children()[0];
+            assert!(
+                content.size().height <= node.size().height,
+                "unexpected scrollbar: content {:?}, viewport {:?}",
+                content.size(),
+                node.size()
+            );
+            assert!(
+                node.size().height < 640.0,
+                "popup is not compact: {:?}",
+                node.size()
+            );
+            // Two provider groups, their divider, the footer divider and footer;
+            // no duplicate limit warning above the groups.
+            assert_eq!(content.children().len(), 5);
+        }
+    }
+
+    #[test]
+    fn constrained_popup_scrolls_all_content_including_footer() {
+        let window = sample_window(Some(sample_snapshot(now_ms())));
+        let natural = layout(window.usage_view(), 240.0);
+        let constrained = layout_at_height(window.usage_view(), 240.0, 280.0);
+        let content = &constrained.children()[0];
+        assert_eq!(constrained.size().height, 280.0);
+        assert!(content.size().height > constrained.size().height);
+        assert_eq!(
+            content.children().len(),
+            natural.children()[0].children().len()
+        );
+        let footer = content.children().last().unwrap().bounds();
+        assert!(footer.height > 0.0);
+        assert!(footer.y + footer.height <= content.size().height);
     }
 
     #[test]
@@ -990,6 +1024,15 @@ mod tests {
     /// Draws `element` at `width` with the tiny-skia renderer and writes a
     /// PAM image (`magick x.pam x.png` converts it).
     fn render(element: Element<'_, Message>, width: f32, path: &std::path::Path) {
+        render_at_height(element, width, POPUP_MAX_HEIGHT, path);
+    }
+
+    fn render_at_height(
+        element: Element<'_, Message>,
+        width: f32,
+        height: f32,
+        path: &std::path::Path,
+    ) {
         use cosmic::iced::advanced::Layout;
         use cosmic::iced::advanced::renderer::{Headless, Style};
         use cosmic::iced::mouse::Cursor;
@@ -1002,7 +1045,7 @@ mod tests {
         let limits = if width.is_finite() {
             cosmic::iced::advanced::layout::Limits::new(
                 Size::new(width, 0.0),
-                Size::new(width, 2000.0),
+                Size::new(width, height),
             )
         } else {
             cosmic::iced::advanced::layout::Limits::new(Size::ZERO, Size::new(2000.0, 2000.0))
@@ -1064,6 +1107,21 @@ mod tests {
             padded_control(window.usage_view()).into(),
             POPUP_WIDTH,
             &dir.join("popup.pam"),
+        );
+        render_at_height(
+            padded_control(window.usage_view()).into(),
+            260.0,
+            300.0,
+            &dir.join("popup-constrained.pam"),
+        );
+        let mut hit = sample_snapshot(now);
+        hit.claude.session.as_mut().unwrap().percent = 100.0;
+        hit.codex.windows[0].percent = 100.0;
+        let hit = sample_window(Some(hit));
+        render(
+            padded_control(hit.usage_view()).into(),
+            POPUP_WIDTH,
+            &dir.join("popup-limit-hit.pam"),
         );
         let mut settings = sample_window(Some(sample_snapshot(now)));
         settings.settings_open = true;

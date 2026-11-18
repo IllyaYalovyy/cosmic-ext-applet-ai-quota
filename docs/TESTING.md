@@ -101,3 +101,7 @@ commit, covering both feature configurations, doc tests and the ignored visual
 renderer. It also runs release-policy and CI planning/publication unit tests,
 then builds and installs/removes the Fedora RPM. See packaging/README.md for
 permissions, artifact retention, release gating, and rerun behavior.
+
+Popup layout regressions verify that normal and limit-hit data fit without
+scrolling, while a constrained viewport keeps every group and footer reachable.
+The renderer also saves `popup-limit-hit` and `popup-constrained` states.

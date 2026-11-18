@@ -412,23 +412,9 @@ pub fn indicator_model(snapshot: Option<&Snapshot>, now: i64, opts: &Options) ->
 // Popup
 // ---------------------------------------------------------------------------
 
-const MAX_DYNAMIC_LABEL_CHARS: usize = 24;
-
-/// Dynamic labels are capped at 24 characters (visual ellipsizing in the
-/// widget is the second line of defense) so data can never widen the popup.
-fn bounded_label(value: &str) -> String {
-    let chars: Vec<char> = value.chars().collect();
-    if chars.len() <= MAX_DYNAMIC_LABEL_CHARS {
-        return value.to_owned();
-    }
-    let mut out: String = chars[..MAX_DYNAMIC_LABEL_CHARS - 1].iter().collect();
-    out.push('…');
-    out
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub struct Section {
-    /// Bounded Codex bucket heading on its first row, else `None`.
+    /// Codex bucket name on its first row, else `None`.
     pub bucket_title: Option<String>,
     pub title: String,
     pub percent: f64,
@@ -463,8 +449,6 @@ pub struct Footer {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct MenuModel {
-    /// §4.5 limit-hit promotion lines, the menu's first block.
-    pub promoted: Vec<String>,
     /// §4.5 unavailable block: plain-language sentence, then the action.
     pub notice: Option<Notice>,
     pub groups: Vec<Group>,
@@ -523,7 +507,7 @@ fn codex_bucket_name(window: &CodexWindow, main_limit_id: Option<&str>) -> Strin
     }
     match &window.limit_name {
         None => "Other usage".to_owned(),
-        Some(name) => bounded_label(name),
+        Some(name) => name.clone(),
     }
 }
 
@@ -580,74 +564,33 @@ fn codex_reset_credit_text(snapshot: &CodexSnapshot) -> Option<String> {
     }
 }
 
-fn codex_promotion_lines(snapshot: &CodexSnapshot, now: i64, clock24: bool) -> Vec<String> {
+/// Only explanations not already conveyed by a quota bar and reset row.
+fn codex_access_notes(snapshot: &CodexSnapshot) -> Vec<String> {
     let main_limit_id = codex_main_limit_id(snapshot);
-    let mut lines = Vec::new();
-    for bucket in codex_buckets(snapshot) {
-        let first = bucket[0];
-        let reached_type = bucket.iter().find_map(|w| w.reached_type.as_deref());
-        let reached_window = bucket
-            .iter()
-            .find(|w| w.percent >= 100.0)
-            .copied()
-            .or_else(|| {
-                bucket
-                    .iter()
-                    .copied()
-                    .fold(None, |best: Option<&CodexWindow>, w| match best {
-                        Some(b) if w.percent <= b.percent => Some(b),
-                        _ => Some(w),
-                    })
-            });
-        let ordinary_denied =
-            Some(first.limit_id.as_str()) == main_limit_id && snapshot.access == Access::Denied;
-        if reached_type.is_none() && !ordinary_denied && !bucket.iter().any(|w| w.percent >= 100.0)
-        {
-            continue;
-        }
-        let mut text = match reached_type {
-            Some("workspace_owner_credits_depleted" | "workspace_member_credits_depleted") => {
-                "Codex workspace credits depleted".to_owned()
+    codex_buckets(snapshot)
+        .into_iter()
+        .filter_map(|bucket| {
+            let reached = bucket.iter().find_map(|w| w.reached_type.as_deref());
+            let name = codex_bucket_name(bucket[0], main_limit_id);
+            match reached {
+                Some("workspace_owner_credits_depleted" | "workspace_member_credits_depleted") => {
+                    Some(format!("{name}: workspace credits depleted"))
+                }
+                Some(
+                    "workspace_owner_usage_limit_reached" | "workspace_member_usage_limit_reached",
+                ) => Some(format!("{name}: workspace usage limit reached")),
+                None if Some(bucket[0].limit_id.as_str()) == main_limit_id
+                    && snapshot.access == Access::Denied =>
+                {
+                    Some(format!("{name}: access unavailable"))
+                }
+                Some(_) if !bucket.iter().any(|w| w.percent >= 100.0) => {
+                    Some(format!("{name}: limit reached"))
+                }
+                _ => None,
             }
-            Some(
-                "workspace_owner_usage_limit_reached" | "workspace_member_usage_limit_reached",
-            ) => "Codex workspace usage limit reached".to_owned(),
-            None if ordinary_denied => "Codex included usage unavailable".to_owned(),
-            _ => {
-                let name = if Some(first.limit_id.as_str()) == main_limit_id {
-                    "Codex included usage".to_owned()
-                } else {
-                    codex_bucket_name(first, main_limit_id)
-                };
-                format!("{name} limit reached")
-            }
-        };
-        let reset_is_authoritative = reached_type == Some("rate_limit_reached")
-            || (reached_type.is_none() && !ordinary_denied);
-        if reset_is_authoritative && let Some(at) = reached_window.and_then(|w| w.resets_at) {
-            text.push_str(&format!(
-                " — {}",
-                lowercase_first(&format_reset_row(at, now, clock24))
-            ));
-        }
-        lines.push(text);
-    }
-    lines
-}
-
-fn claude_promoted_line(constraint: &ClaudeConstraint<'_>, now: i64, clock24: bool) -> String {
-    let name = match constraint.kind {
-        ClaudeKind::Session => "session".to_owned(),
-        ClaudeKind::Week => "weekly".to_owned(),
-        ClaudeKind::WeekModel => format!("weekly {}", constraint.model.unwrap_or("")),
-    };
-    match constraint.resets_at {
-        None => format!("Claude {name} limit reached"),
-        Some(at) => format!(
-            "Claude {name} limit reached — {}",
-            lowercase_first(&format_reset_row(at, now, clock24))
-        ),
-    }
+        })
+        .collect()
 }
 
 /// §4.5 wording table. Only `NotInstalled` (and the Codex unknown-access
@@ -723,7 +666,7 @@ pub fn menu_model(snapshot: Option<&Snapshot>, now: i64, opts: &Options) -> Menu
         }
         for entry in &claude.week_model {
             claude_sections.push(claude_section(
-                format!("{} · 7 days", bounded_label(&entry.model)),
+                format!("{} · 7 days", entry.model),
                 entry.window.percent,
                 entry.window.resets_at,
                 now,
@@ -745,7 +688,15 @@ pub fn menu_model(snapshot: Option<&Snapshot>, now: i64, opts: &Options) -> Menu
             title: "Codex",
             mark: Mark::Codex,
             sections: codex_sections,
-            note: codex.and_then(codex_reset_credit_text),
+            note: codex.and_then(|c| {
+                let mut notes = if now - c.fetched_at <= opts.stale_after_ms {
+                    codex_access_notes(c)
+                } else {
+                    Vec::new()
+                };
+                notes.extend(codex_reset_credit_text(c));
+                (!notes.is_empty()).then(|| notes.join("\n"))
+            }),
         },
     ]
     .into_iter()
@@ -776,20 +727,6 @@ pub fn menu_model(snapshot: Option<&Snapshot>, now: i64, opts: &Options) -> Menu
         }),
     };
 
-    let mut promoted = Vec::new();
-    if let (Some(claude), Some(constraint)) = (claude, &claude_constraint)
-        && now - claude.fetched_at <= opts.stale_after_ms
-        && constraint.percent >= 100.0
-    {
-        promoted.push(claude_promoted_line(constraint, now, opts.clock24));
-    }
-    if let Some(codex) = codex
-        && !codex.windows.is_empty()
-        && now - codex.fetched_at <= opts.stale_after_ms
-    {
-        promoted.extend(codex_promotion_lines(codex, now, opts.clock24));
-    }
-
     let freshness_text = format!(
         "{} · {}",
         freshness_part(
@@ -813,7 +750,6 @@ pub fn menu_model(snapshot: Option<&Snapshot>, now: i64, opts: &Options) -> Menu
         || (codex_usable && codex.is_some_and(|c| now - c.fetched_at > opts.stale_after_ms));
 
     MenuModel {
-        promoted,
         notice,
         groups,
         footer: Footer {
@@ -934,7 +870,7 @@ mod tests {
         );
         assert_eq!(model.items[1].state, State::Normal);
         assert_eq!(model.items[1].percent, Some(31.0));
-        // ...but the menu still promotes the model bucket's own reached state.
+        // The model-specific row retains its reached state without a banner.
         let menu = menu_model(
             Some(&Snapshot {
                 claude: claude_fixture(),
@@ -943,12 +879,8 @@ mod tests {
             0,
             &Options::default(),
         );
-        assert_eq!(menu.promoted.len(), 1);
-        assert!(
-            menu.promoted[0].starts_with("GPT-5.3-Codex-Spark limit reached — resets"),
-            "{:?}",
-            menu.promoted
-        );
+        assert_eq!(menu.groups[1].sections[1].bar_state, State::Critical);
+        assert!(menu.groups[1].sections[1].reset_text.is_some());
     }
 
     #[test]
@@ -1034,7 +966,6 @@ mod tests {
         let now = 1_000_000;
         let menu = menu_model(Some(&snapshot(now)), now, &Options::default());
         assert_eq!(menu.notice, None);
-        assert!(menu.promoted.is_empty());
         assert_eq!(menu.groups.len(), 2);
         let claude = &menu.groups[0];
         assert_eq!(claude.title, "Claude");
@@ -1073,13 +1004,12 @@ mod tests {
     }
 
     #[test]
-    fn long_model_names_are_bounded() {
+    fn long_model_names_retain_their_full_text() {
         let mut snap = snapshot(0);
         snap.claude.week_model[0].model = "A".repeat(40);
         let menu = menu_model(Some(&snap), 0, &Options::default());
         let title = &menu.groups[0].sections[2].title;
-        assert_eq!(title.chars().count(), 24 + " · 7 days".chars().count());
-        assert!(title.contains('…'));
+        assert_eq!(title, &format!("{} · 7 days", "A".repeat(40)));
         assert_eq!(duration_label(Some(300.0), Slot::Primary), "5 hours");
         assert_eq!(duration_label(Some(60.0), Slot::Primary), "1 hour");
         assert_eq!(duration_label(Some(90.0), Slot::Primary), "90 min");
@@ -1134,7 +1064,35 @@ mod tests {
     }
 
     #[test]
-    fn limit_hit_promotes_the_reset_row_unless_stale() {
+    fn workspace_errors_remain_visible_without_duplicate_quota_warnings() {
+        let now = 1_000_000;
+        let opts = Options::default();
+        let mut snap = snapshot(now);
+        snap.codex.windows[0].percent = 100.0;
+        snap.codex.windows[0].reached_type = Some("rate_limit_reached".into());
+        let menu = menu_model(Some(&snap), now, &opts);
+        assert_eq!(
+            menu.groups[1].note.as_deref(),
+            Some("2 rate-limit resets available")
+        );
+        assert_eq!(menu.groups[1].sections[0].percent_text, "100%");
+        assert!(menu.groups[1].sections[0].reset_text.is_some());
+
+        snap.codex.windows[0].reached_type = Some("workspace_owner_credits_depleted".into());
+        let menu = menu_model(Some(&snap), now, &opts);
+        assert_eq!(
+            menu.groups[1].note.as_deref(),
+            Some("Included usage: workspace credits depleted\n2 rate-limit resets available")
+        );
+        let stale = menu_model(Some(&snap), now + opts.stale_after_ms + 1, &opts);
+        assert_eq!(
+            stale.groups[1].note.as_deref(),
+            Some("2 rate-limit resets available")
+        );
+    }
+
+    #[test]
+    fn limit_hit_keeps_reset_and_access_details_in_the_provider_group() {
         let now = 1_000_000;
         let opts = Options::default();
         let mut hit = snapshot(now);
@@ -1143,20 +1101,26 @@ mod tests {
             resets_at: Some(now + 72 * MINUTE_MS),
         });
         let menu = menu_model(Some(&hit), now, &opts);
-        assert_eq!(menu.promoted.len(), 1);
-        assert!(
-            menu.promoted[0].starts_with("Claude session limit reached — resets in 1 h 12 m ("),
-            "{:?}",
-            menu.promoted
-        );
         assert_eq!(menu.groups[0].sections[0].bar_state, State::Critical);
-        let stale = menu_model(Some(&hit), now + opts.stale_after_ms + 1, &opts);
-        assert!(stale.promoted.is_empty());
+        assert!(
+            menu.groups[0].sections[0]
+                .reset_text
+                .as_ref()
+                .unwrap()
+                .starts_with("Resets in 1 h 12 m (")
+        );
+        assert_eq!(menu.groups[0].note, None);
 
         let mut denied = snapshot(now);
         denied.codex.access = Access::Denied;
         let menu = menu_model(Some(&denied), now, &opts);
-        assert_eq!(menu.promoted, ["Codex included usage unavailable"]);
+        assert!(
+            menu.groups[1]
+                .note
+                .as_ref()
+                .unwrap()
+                .contains("Included usage: access unavailable")
+        );
         assert_eq!(menu.groups[1].sections[0].bar_state, State::Critical);
         assert_eq!(menu.groups[1].sections[1].bar_state, State::Normal);
     }

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.4 — 2026-11-18
+
+- Remove duplicate limit-hit banners and combine quota names with durations.
+- Let the compact popup grow with its contents instead of scrolling at a fixed 500 px body limit.
+- Preserve full model names, reset times, percentages and distinct access/workspace explanations.
+- Add normal, limit-hit and constrained-popup layout regressions and rendered evidence.
+
 ## 0.2.3 — 2026-11-09
 
 - Publish using the GitHub draft release ID directly, avoiding delayed release-list visibility.
