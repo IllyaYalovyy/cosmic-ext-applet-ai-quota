@@ -105,3 +105,18 @@ permissions, artifact retention, release gating, and rerun behavior.
 Popup layout regressions verify that normal and limit-hit data fit without
 scrolling, while a constrained viewport keeps every group and footer reachable.
 The renderer also saves `popup-limit-hit` and `popup-constrained` states.
+
+## Provider metadata validation (2026-11-21)
+
+Live Claude Code 2.1.330 `/usage` returned a successful envelope with zero cost,
+zero input/output/cache tokens and no model usage. Codex CLI 0.166.0 returned
+`account/rateLimits/read` after initialization; no thread or turn methods ran.
+Sanitized fixtures preserve response structure with synthetic values and dates,
+without account IDs or reset-credit identifiers. The Codex CLI-generated schema
+confirms nullable credit balances and expiry timestamps in Unix seconds.
+
+Tests cover optional-field drift, expired/spent reset credits, weekly model-index
+mapping and the distinction between weekly consumption shares and model quota
+percentages. The enriched six-window renderer/layout test includes all new
+metadata and must fit a normal 720 px content area without scrolling. Live
+compositor interaction is separate from offscreen rendering.

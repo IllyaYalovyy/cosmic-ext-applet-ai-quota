@@ -424,6 +424,7 @@ pub struct Section {
     pub bar_state: State,
     /// §4.3 reset row, or `None` for no row (never a fabricated countdown).
     pub reset_text: Option<String>,
+    pub detail_text: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -479,6 +480,7 @@ fn claude_section(
         percent_text: format_percent(percent),
         bar_state: bar_state(percent, opts),
         reset_text: resets_at.map(|at| format_reset_row(at, now, opts.clock24)),
+        detail_text: None,
     }
 }
 
@@ -545,6 +547,7 @@ fn codex_sections(snapshot: &CodexSnapshot, now: i64, opts: &Options) -> Vec<Sec
                 } else {
                     bar_state(window.percent, opts)
                 },
+                detail_text: None,
                 reset_text: window
                     .resets_at
                     .map(|at| format_reset_row(at, now, opts.clock24)),
@@ -555,13 +558,76 @@ fn codex_sections(snapshot: &CodexSnapshot, now: i64, opts: &Options) -> Vec<Sec
 }
 
 fn codex_reset_credit_text(snapshot: &CodexSnapshot) -> Option<String> {
-    match snapshot.reset_credits_available {
-        Some(count) if count > 0 => Some(format!(
-            "{count} rate-limit {} available",
-            if count == 1 { "reset" } else { "resets" }
-        )),
-        _ => None,
+    let count = snapshot.reset_credits_available.filter(|n| *n > 0)?;
+    let mut text = format!(
+        "{count} rate-limit {} available",
+        if count == 1 { "reset" } else { "resets" }
+    );
+    if let Some(at) = snapshot.details.reset_credit_expires_at
+        && let Some(date) = Local.timestamp_millis_opt(at).single()
+    {
+        text.push_str(&format!(
+            " · {}expires {}",
+            if count > 1 { "next " } else { "" },
+            date.format("%b %-d")
+        ));
     }
+    Some(text)
+}
+
+fn codex_account_text(snapshot: &CodexSnapshot) -> Option<String> {
+    let mut parts = Vec::new();
+    if let Some(plan) = &snapshot.details.plan_type {
+        let name = match plan.as_str() {
+            "prolite" => "Pro Lite",
+            "pro" => "Pro",
+            "plus" => "Plus",
+            "free" => "Free",
+            "team" => "Team",
+            "business" => "Business",
+            "enterprise" => "Enterprise",
+            _ => plan,
+        };
+        parts.push(format!("Plan: {name}"));
+    }
+    if let Some(credits) = &snapshot.details.credits {
+        if credits.unlimited {
+            parts.push("Credits: unlimited".to_owned());
+        } else if let Some(balance) = &credits.balance {
+            parts.push(format!("Credits: {balance}"));
+        } else {
+            parts.push(format!(
+                "Credits: {}",
+                if credits.has_credits {
+                    "available"
+                } else {
+                    "none"
+                }
+            ));
+        }
+    }
+    (!parts.is_empty()).then(|| parts.join(" · "))
+}
+
+fn claude_details_text(snapshot: &ClaudeSnapshot) -> Option<String> {
+    let mut lines = Vec::new();
+    let contributions: Vec<_> = snapshot
+        .details
+        .weekly_breakdown
+        .iter()
+        .filter(|entry| entry.percent > 0.0)
+        .map(|entry| format!("{} {}%", entry.display_name, entry.percent))
+        .collect();
+    if !contributions.is_empty() {
+        lines.push(format!("Weekly usage share: {}", contributions.join(" · ")));
+    }
+    if let Some(enabled) = snapshot.details.extra_usage_enabled {
+        lines.push(format!(
+            "Extra usage: {}",
+            if enabled { "on" } else { "off" }
+        ));
+    }
+    (!lines.is_empty()).then(|| lines.join("\n"))
 }
 
 /// Only explanations not already conveyed by a quota bar and reset row.
@@ -665,13 +731,25 @@ pub fn menu_model(snapshot: Option<&Snapshot>, now: i64, opts: &Options) -> Menu
             ));
         }
         for entry in &claude.week_model {
-            claude_sections.push(claude_section(
+            let mut section = claude_section(
                 format!("{} · 7 days", entry.model),
                 entry.window.percent,
                 entry.window.resets_at,
                 now,
                 opts,
-            ));
+            );
+            if let Some(share) = claude
+                .details
+                .weekly_shares
+                .iter()
+                .find(|s| s.model == entry.model)
+            {
+                section.detail_text = Some(format!(
+                    "Weekly pool: {}% used · {}% allowance",
+                    share.used, share.allowance
+                ));
+            }
+            claude_sections.push(section);
         }
     }
     let codex_sections = codex
@@ -682,7 +760,7 @@ pub fn menu_model(snapshot: Option<&Snapshot>, now: i64, opts: &Options) -> Menu
             title: "Claude",
             mark: Mark::Claude,
             sections: claude_sections,
-            note: None,
+            note: claude.and_then(claude_details_text),
         },
         Group {
             title: "Codex",
@@ -694,6 +772,10 @@ pub fn menu_model(snapshot: Option<&Snapshot>, now: i64, opts: &Options) -> Menu
                 } else {
                     Vec::new()
                 };
+                if c.details.spend_control_reached {
+                    notes.push("Spending limit reached".to_owned());
+                }
+                notes.extend(codex_account_text(c));
                 notes.extend(codex_reset_credit_text(c));
                 (!notes.is_empty()).then(|| notes.join("\n"))
             }),
@@ -789,6 +871,39 @@ mod tests {
     }
 
     #[test]
+    fn provider_details_are_compact_and_distinguish_weekly_percentages() {
+        let now = 1_893_450_000_000;
+        let snapshot = Snapshot {
+            claude: crate::claude::parse_snapshot(
+                include_bytes!("../tests/fixtures/claude-2.1.330-usage.json"),
+                now,
+            ),
+            codex: crate::codex::parse_codex_rate_limits(
+                &serde_json::from_str(include_str!(
+                    "../tests/fixtures/codex-0.166.0-rate-limits.json"
+                ))
+                .unwrap(),
+                now,
+            ),
+        };
+        let menu = menu_model(Some(&snapshot), now, &Options::default());
+        assert_eq!(menu.groups[0].sections[2].percent_text, "24%");
+        assert_eq!(
+            menu.groups[0].sections[2].detail_text.as_deref(),
+            Some("Weekly pool: 12% used · 50% allowance")
+        );
+        assert_eq!(
+            menu.groups[0].note.as_deref(),
+            Some("Weekly usage share: Claude Code 70% · Chats 20% · Cowork 10%\nExtra usage: off")
+        );
+        let note = menu.groups[1].note.as_ref().unwrap();
+        assert!(note.starts_with(
+            "Plan: Pro Lite · Credits: 12.50\n1 rate-limit reset available · expires "
+        ));
+        assert_eq!(note.lines().count(), 2);
+    }
+
+    #[test]
     fn countdown_and_age_wording() {
         assert_eq!(format_countdown(59_999), "<1 min");
         assert_eq!(format_countdown(12 * MINUTE_MS + 59_000), "12 m");
@@ -824,6 +939,7 @@ mod tests {
         assert_eq!(constraint.kind, ClaudeKind::Week);
         assert_eq!(constraint.percent, 34.0);
         let tie = ClaudeSnapshot {
+            details: Default::default(),
             fetched_at: 1,
             session: Some(UsageWindow {
                 percent: 50.0,
@@ -1109,7 +1225,7 @@ mod tests {
                 .unwrap()
                 .starts_with("Resets in 1 h 12 m (")
         );
-        assert_eq!(menu.groups[0].note, None);
+        assert_eq!(menu.groups[0].note.as_deref(), Some("Extra usage: off"));
 
         let mut denied = snapshot(now);
         denied.codex.access = Access::Denied;

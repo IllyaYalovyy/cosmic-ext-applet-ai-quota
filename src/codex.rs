@@ -42,12 +42,29 @@ pub enum Access {
     Denied,
 }
 
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreditBalance {
+    pub has_credits: bool,
+    pub unlimited: bool,
+    pub balance: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CodexDetails {
+    pub plan_type: Option<String>,
+    pub credits: Option<CreditBalance>,
+    pub spend_control_reached: bool,
+    pub reset_credit_expires_at: Option<i64>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct CodexSnapshot {
     pub fetched_at: i64,
     pub main_limit_id: Option<String>,
     pub access: Access,
     pub reset_credits_available: Option<u64>,
+    pub details: CodexDetails,
     pub windows: Vec<CodexWindow>,
     pub error: Option<ProviderError>,
     /// Journal-only detail for `ReadFailed`.
@@ -61,6 +78,7 @@ impl CodexSnapshot {
             main_limit_id: None,
             access: Access::Absent,
             reset_credits_available: None,
+            details: CodexDetails::default(),
             windows: Vec::new(),
             error: Some(error),
             reason,
@@ -239,15 +257,49 @@ pub fn parse_codex_rate_limits(result: &Value, now: i64) -> CodexSnapshot {
     if windows.is_empty() {
         return CodexSnapshot::failed(now, ProviderError::NotAuthenticated, None);
     }
+    let details = parse_details(result, main_limit_id.as_deref(), now);
     CodexSnapshot {
         fetched_at: now,
         main_limit_id,
+        details,
         access,
         reset_credits_available: reset_credits,
         windows,
         error: None,
         reason: None,
     }
+}
+
+fn parse_details(result: &Map<String, Value>, main_id: Option<&str>, now: i64) -> CodexDetails {
+    let main = main_id
+        .and_then(|id| result.get("rateLimitsByLimitId")?.get(id))
+        .or_else(|| result.get("rateLimits"));
+    let mut details = CodexDetails::default();
+    if let Some(main) = main {
+        details.plan_type = main["planType"]
+            .as_str()
+            .filter(|s| !s.trim().is_empty())
+            .map(str::to_owned);
+        details.credits = serde_json::from_value(main["credits"].clone()).ok();
+        if let Some(credits) = &mut details.credits {
+            credits.balance = credits
+                .balance
+                .take()
+                .filter(|s| s.parse::<f64>().is_ok_and(|n| n.is_finite() && n >= 0.0));
+        }
+        details.spend_control_reached = main["spendControlReached"].as_bool() == Some(true);
+    }
+    details.reset_credit_expires_at = result
+        .get("rateLimitResetCredits")
+        .and_then(|v| v.get("credits"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|credit| credit["status"] == "available")
+        .filter_map(|credit| credit["expiresAt"].as_i64()?.checked_mul(1000))
+        .filter(|expires| *expires > now)
+        .min();
+    details
 }
 
 // ---------------------------------------------------------------------------
@@ -499,6 +551,64 @@ impl CodexSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const CURRENT: &str = include_str!("../tests/fixtures/codex-0.166.0-rate-limits.json");
+
+    #[test]
+    fn current_account_metadata_preserves_credits_without_currency_assumptions() {
+        let raw = serde_json::from_str(CURRENT).unwrap();
+        let snapshot = parse_codex_rate_limits(&raw, 1_893_450_000_000);
+        assert!(!snapshot.is_error());
+        assert_eq!(snapshot.details.plan_type.as_deref(), Some("prolite"));
+        let credits = snapshot.details.credits.unwrap();
+        assert!(credits.has_credits);
+        assert!(!credits.unlimited);
+        assert_eq!(credits.balance.as_deref(), Some("12.50"));
+        assert_eq!(
+            snapshot.details.reset_credit_expires_at,
+            Some(1_893_800_000_000)
+        );
+        assert_eq!(snapshot.windows[0].percent, 37.0);
+    }
+
+    #[test]
+    fn reset_expiry_ignores_spent_expired_and_invalid_credits() {
+        let mut raw: Value = serde_json::from_str(CURRENT).unwrap();
+        raw["rateLimitResetCredits"]["credits"] = serde_json::json!([
+            {"status":"available", "expiresAt": 100},
+            {"status":"used", "expiresAt": 110},
+            {"status":"available", "expiresAt": null},
+            {"status":"available", "expiresAt": "120"},
+            {"status":"available", "expiresAt": 150},
+            {"status":"available", "expiresAt": 130}
+        ]);
+        assert_eq!(
+            parse_codex_rate_limits(&raw, 100_000)
+                .details
+                .reset_credit_expires_at,
+            Some(130_000)
+        );
+        assert_eq!(
+            parse_codex_rate_limits(&raw, 200_000)
+                .details
+                .reset_credit_expires_at,
+            None
+        );
+    }
+
+    #[test]
+    fn optional_account_drift_leaves_quotas_usable() {
+        let mut raw: Value = serde_json::from_str(CURRENT).unwrap();
+        let main = &mut raw["rateLimitsByLimitId"]["codex"];
+        main["planType"] = serde_json::json!(5);
+        main["credits"]["balance"] = serde_json::json!("NaN");
+        main["spendControlReached"] = serde_json::json!(true);
+        let snapshot = parse_codex_rate_limits(&raw, 0);
+        assert!(!snapshot.is_error());
+        assert_eq!(snapshot.details.plan_type, None);
+        assert_eq!(snapshot.details.credits.unwrap().balance, None);
+        assert!(snapshot.details.spend_control_reached);
+    }
 
     const RESULT: &str = include_str!("../tests/fixtures/codex-rate-limits-result.json");
     const RESPONSE: &str = include_str!("../tests/fixtures/codex-app-server-response.json");

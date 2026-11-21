@@ -36,6 +36,13 @@ Hovering the strip shows the full story as a tooltip (percent, reset time,
 staleness, reached states) — the applet never shows a number its data source
 did not provide.
 
+The dropdown also shows Claude's weekly usage share by product, model allowances
+as a share of the weekly pool, and extra-usage state when provided. Codex includes
+plan, credit balance (in credits, not an inferred currency), spending-limit status
+and the next available reset-credit expiry. Zero-contribution products and absent
+optional fields do not add rows. Local-session usage suggestions, account IDs and
+promotional/control fields are not displayed.
+
 ## Data sources and the no-model-turn guarantee
 
 - **Claude Code** — reads the `cachedUsageUtilization` object in
@@ -68,7 +75,7 @@ last fetch is older than 15 s.
 Download the RPM from [Releases](https://github.com/IllyaYalovyy/cosmic-ext-applet-ai-quota/releases), then install:
 
 ```sh
-sudo dnf install ./cosmic-ext-applet-ai-quota-0.2.4-1.fc45.x86_64.rpm
+sudo dnf install ./cosmic-ext-applet-ai-quota-0.3.0-1.fc45.x86_64.rpm
 ```
 
 Add **AI Quota** in COSMIC Settings → Desktop → Panel (or Dock). The first

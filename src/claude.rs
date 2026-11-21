@@ -46,6 +46,28 @@ pub struct ModelWindow {
     pub window: UsageWindow,
 }
 
+/// Share of account-wide weekly usage attributed to a product surface.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct WeeklyContribution {
+    pub display_name: String,
+    pub percent: f64,
+}
+
+/// Model consumption and allowance, both relative to the account weekly limit.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WeeklyShare {
+    pub model: String,
+    pub used: f64,
+    pub allowance: f64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ClaudeDetails {
+    pub extra_usage_enabled: Option<bool>,
+    pub weekly_breakdown: Vec<WeeklyContribution>,
+    pub weekly_shares: Vec<WeeklyShare>,
+}
+
 /// The Claude display contract. Error snapshots carry only
 /// `fetched_at` (the attempt time) and `error`.
 #[derive(Debug, Clone, PartialEq)]
@@ -54,6 +76,7 @@ pub struct ClaudeSnapshot {
     pub session: Option<UsageWindow>,
     pub week: Option<UsageWindow>,
     pub week_model: Vec<ModelWindow>,
+    pub details: ClaudeDetails,
     pub error: Option<ProviderError>,
 }
 
@@ -64,6 +87,7 @@ impl ClaudeSnapshot {
             session: None,
             week: None,
             week_model: Vec::new(),
+            details: ClaudeDetails::default(),
             error: Some(error),
         }
     }
@@ -127,6 +151,7 @@ pub fn parse_snapshot(raw: &[u8], now: i64) -> ClaudeSnapshot {
         session: None,
         week: None,
         week_model: Vec::new(),
+        details: parse_details(&cache),
         error: None,
     };
     for limit in limits {
@@ -180,6 +205,54 @@ pub fn parse_snapshot(raw: &[u8], now: i64) -> ClaudeSnapshot {
         }
     }
     snapshot
+}
+
+fn metadata_percent(value: &Value) -> Option<f64> {
+    value
+        .as_f64()
+        .filter(|n| n.is_finite() && (0.0..=100.0).contains(n))
+}
+
+fn parse_details(cache: &Map<String, Value>) -> ClaudeDetails {
+    let usage = &cache["utilization"];
+    let weekly_breakdown = usage["seven_day_breakdown"]["rows"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|row| {
+            let entry: WeeklyContribution = serde_json::from_value(row.clone()).ok()?;
+            (!entry.display_name.trim().is_empty() && metadata_percent(&row["percent"]).is_some())
+                .then_some(entry)
+        })
+        .collect();
+    let weekly_shares = usage["weekly_scoped_shares"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|share| {
+            let index = usize::try_from(share["limit_index"].as_u64()?).ok()?;
+            let limit = usage["limits"].as_array()?.get(index)?;
+            if limit["kind"] != "weekly_scoped" {
+                return None;
+            }
+            let model = limit["scope"]["model"]["display_name"].as_str()?;
+            if model.trim().is_empty() {
+                return None;
+            }
+            Some(WeeklyShare {
+                model: model.to_owned(),
+                used: metadata_percent(&share["used_percent_of_weekly"])?,
+                allowance: metadata_percent(&share["allowance_percent_of_weekly"])?,
+            })
+        })
+        .collect();
+    ClaudeDetails {
+        extra_usage_enabled: usage["spend"]["enabled"]
+            .as_bool()
+            .or_else(|| usage["extra_usage"]["is_enabled"].as_bool()),
+        weekly_breakdown,
+        weekly_shares,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -541,6 +614,51 @@ impl ClaudeSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const CURRENT: &str = include_str!("../tests/fixtures/claude-2.1.330-usage.json");
+
+    #[test]
+    fn current_usage_details_keep_weekly_share_units_and_model_mapping() {
+        let snapshot = parse_snapshot(CURRENT.as_bytes(), 0);
+        assert!(!snapshot.is_error());
+        assert_eq!(snapshot.details.extra_usage_enabled, Some(false));
+        assert_eq!(
+            snapshot.details.weekly_breakdown[0].display_name,
+            "Claude Code"
+        );
+        assert_eq!(snapshot.details.weekly_breakdown[0].percent, 70.0);
+        assert_eq!(
+            snapshot.details.weekly_shares,
+            vec![WeeklyShare {
+                model: "Fable".into(),
+                used: 12.0,
+                allowance: 50.0,
+            }]
+        );
+        assert_eq!(snapshot.week_model[0].window.percent, 24.0);
+    }
+
+    #[test]
+    fn malformed_optional_details_do_not_discard_valid_quotas() {
+        let mut raw: Value = serde_json::from_str(CURRENT).unwrap();
+        let usage = &mut raw["cachedUsageUtilization"]["utilization"];
+        usage["weekly_scoped_shares"] = serde_json::json!([
+            {"limit_index": 0, "used_percent_of_weekly": 12, "allowance_percent_of_weekly": 50},
+            {"limit_index": 999, "used_percent_of_weekly": 12, "allowance_percent_of_weekly": 50},
+            {"limit_index": 2, "used_percent_of_weekly": -1, "allowance_percent_of_weekly": 50}
+        ]);
+        usage["seven_day_breakdown"]["rows"] = serde_json::json!([
+            {"display_name": "Broken", "percent": "70"},
+            {"display_name": "", "percent": 20},
+            {"display_name": "Chats", "percent": 20}
+        ]);
+        let snapshot = parse_snapshot(&serde_json::to_vec(&raw).unwrap(), 0);
+        assert!(!snapshot.is_error());
+        assert_eq!(snapshot.session.unwrap().percent, 26.0);
+        assert!(snapshot.details.weekly_shares.is_empty());
+        assert_eq!(snapshot.details.weekly_breakdown.len(), 1);
+        assert_eq!(snapshot.details.weekly_breakdown[0].display_name, "Chats");
+    }
 
     const CACHE: &str = include_str!("../tests/fixtures/cached-usage-utilization.json");
     const ENVELOPE: &str = include_str!("../tests/fixtures/claude-p-usage-result.json");

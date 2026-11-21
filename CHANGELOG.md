@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.0 — 2026-11-21
+
+- Validate live Claude Code 2.1.330 and Codex CLI 0.166.0 usage output without model turns.
+- Show Claude weekly usage shares, scoped model allowances and extra-usage state.
+- Show Codex plan, credit balance, spending-control status and available reset-credit expiry.
+- Keep optional metadata failures separate from quota parsing and preserve a scroll-free normal dropdown.
+
 ## 0.2.4 — 2026-11-18
 
 - Remove duplicate limit-hit banners and combine quota names with durations.

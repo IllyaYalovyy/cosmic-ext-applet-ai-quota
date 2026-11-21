@@ -66,7 +66,7 @@ pub enum Message {
     Tick,
     /// The 1 s footer clock while the popup is open.
     FooterTick,
-    Fetched(u64, FetchOutput),
+    Fetched(u64, Box<FetchOutput>),
     /// The §4.4 refresh button.
     RefreshNow,
     ToggleSettings,
@@ -380,7 +380,7 @@ impl Window {
                     .fetch(now, manual, interval_seconds)
                     .await
             },
-            move |output| Message::Fetched(generation, output).into(),
+            move |output| Message::Fetched(generation, Box::new(output)).into(),
         )
     }
 
@@ -559,6 +559,13 @@ impl Window {
             if let Some(reset) = &section.reset_text {
                 block = block.push(
                     widget::text::caption(reset.clone())
+                        .class(cosmic::theme::Text::Color(dim))
+                        .width(Length::Fill),
+                );
+            }
+            if let Some(detail) = &section.detail_text {
+                block = block.push(
+                    widget::text::caption(detail.clone())
                         .class(cosmic::theme::Text::Color(dim))
                         .width(Length::Fill),
                 );
@@ -816,6 +823,29 @@ mod tests {
         Snapshot { claude, codex }
     }
 
+    fn enriched_snapshot(now: i64) -> Snapshot {
+        let mut snapshot = sample_snapshot(now);
+        let claude = crate::claude::parse_snapshot(
+            include_bytes!("../tests/fixtures/claude-2.1.330-usage.json"),
+            now,
+        );
+        let codex = parse_codex_rate_limits(
+            &serde_json::from_str(include_str!(
+                "../tests/fixtures/codex-0.166.0-rate-limits.json"
+            ))
+            .unwrap(),
+            now,
+        );
+        snapshot.claude.session.as_mut().unwrap().percent =
+            claude.session.as_ref().unwrap().percent;
+        snapshot.claude.week.as_mut().unwrap().percent = claude.week.as_ref().unwrap().percent;
+        snapshot.claude.week_model[0].window.percent = claude.week_model[0].window.percent;
+        snapshot.claude.details = claude.details;
+        snapshot.codex.details = codex.details;
+        snapshot.codex.details.reset_credit_expires_at = Some(now + 7 * 86_400_000);
+        snapshot
+    }
+
     fn sample_window(snapshot: Option<Snapshot>) -> Window {
         let settings = Settings::default();
         let refresh_disabled = Arc::new(AtomicBool::new(false));
@@ -927,6 +957,14 @@ mod tests {
     }
 
     #[test]
+    fn enriched_multi_model_popup_fits_a_normal_screen_without_scrolling() {
+        let window = sample_window(Some(enriched_snapshot(now_ms())));
+        let node = layout_at_height(window.usage_view(), body_width(), 720.0);
+        assert!(node.children()[0].size().height <= node.size().height);
+        assert!(node.size().height < 720.0, "{:?}", node.size());
+    }
+
+    #[test]
     fn constrained_popup_scrolls_all_content_including_footer() {
         let window = sample_window(Some(sample_snapshot(now_ms())));
         let natural = layout(window.usage_view(), 240.0);
@@ -1015,7 +1053,7 @@ mod tests {
             last_refresh_failed: RefreshFailed::default(),
             claude_refresh_disabled: false,
         };
-        let _ = window.update(Message::Fetched(1, output));
+        let _ = window.update(Message::Fetched(1, Box::new(output)));
         assert!(window.in_flight);
         assert!(window.manual_pending());
         assert!(!window.refetch_queued);
@@ -1123,6 +1161,12 @@ mod tests {
             POPUP_WIDTH,
             &dir.join("popup-limit-hit.pam"),
         );
+        let enriched = sample_window(Some(enriched_snapshot(now)));
+        render(
+            padded_control(enriched.usage_view()).into(),
+            POPUP_WIDTH,
+            &dir.join("popup-provider-details.pam"),
+        );
         let mut settings = sample_window(Some(sample_snapshot(now)));
         settings.settings_open = true;
         settings.settings.refresh_path_disabled = true;
@@ -1207,22 +1251,22 @@ mod tests {
                 let generation = window.generation;
                 let _ = window.update(Message::Fetched(
                     generation,
-                    FetchOutput {
+                    Box::new(FetchOutput {
                         snapshot: sample_snapshot(5),
                         last_refresh_failed: failed,
                         claude_refresh_disabled: false,
-                    },
+                    }),
                 ));
                 assert_eq!(window.backoff.delay_sec, expected);
             }
             let generation = window.generation;
             let _ = window.update(Message::Fetched(
                 generation,
-                FetchOutput {
+                Box::new(FetchOutput {
                     snapshot: sample_snapshot(5),
                     last_refresh_failed: RefreshFailed::default(),
                     claude_refresh_disabled: false,
-                },
+                }),
             ));
             assert_eq!(window.backoff.failures, 0);
         }
@@ -1236,11 +1280,11 @@ mod tests {
         assert!(!window.refetch_queued);
         let _ = window.update(Message::Fetched(
             6,
-            FetchOutput {
+            Box::new(FetchOutput {
                 snapshot: sample_snapshot(5),
                 last_refresh_failed: RefreshFailed::default(),
                 claude_refresh_disabled: true,
-            },
+            }),
         ));
         assert!(window.in_flight);
         assert!(window.snapshot.is_none());
@@ -1261,13 +1305,13 @@ mod tests {
             last_refresh_failed: RefreshFailed::default(),
             claude_refresh_disabled: false,
         };
-        let _ = window.update(Message::Fetched(1, output.clone()));
+        let _ = window.update(Message::Fetched(1, Box::new(output.clone())));
         assert_eq!(window.generation, 2);
         assert!(window.manual_pending());
         for _ in 0..5 {
             let _ = window.update(Message::RefreshNow);
         }
-        let _ = window.update(Message::Fetched(2, output));
+        let _ = window.update(Message::Fetched(2, Box::new(output)));
         assert_eq!(window.generation, 2);
         assert!(!window.in_flight);
         assert!(!window.manual_pending());
